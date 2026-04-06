@@ -91,41 +91,27 @@ def create_user(
     admin endpoint (not this service directly).
     """
     # ── Determine which broker owns this user ──────────────────────────
-    # ── Determine role safely (User OR Broker) ──────────────────────────
-    role = getattr(requester, "role", "BROKER")
-
-    if role == UserRole.BROKER or role == "BROKER":
+    if requester.role == UserRole.BROKER:
         broker_id = requester.id
-        broker = db.get(Broker, broker_id)
-
+        broker    = db.get(Broker, broker_id)
         if not broker or not broker.is_active:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Your broker account is inactive.",
             )
-
         _check_max_users(db, broker)
     else:
-    # Super Admin flow
-        if not payload.broker_id:
-            raise HTTPException(
-                status_code=400,
-                detail="Super Admin must provide broker_id"
-            )
-         
-        broker_id = payload.broker_id
-       
+        # Super Admin flow — broker_id is not set here; use admin endpoint
+        broker_id = None
 
     # ── Uniqueness checks ──────────────────────────────────────────────
-    existing = db.scalar(select(User.id).where(User.email == payload.email))
-    if existing:
+    if db.scalar(select(User).where(User.email == payload.email)):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"A user with email '{payload.email}' already exists.",
         )
     if payload.phone:
-        existing_phone = db.scalar(select(User.id).where(User.phone == payload.phone))
-        if existing_phone:
+        if db.scalar(select(User).where(User.phone == payload.phone)):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"A user with phone '{payload.phone}' already exists.",
@@ -198,8 +184,7 @@ def list_users(
     query = select(User)
 
     # Scope by broker
-    role = getattr(requester, "role", "BROKER")
-    if role == UserRole.BROKER or role == "BROKER":
+    if requester.role == UserRole.BROKER:
         query = query.where(User.broker_id == requester.id)
 
     # Optional filters
@@ -210,7 +195,7 @@ def list_users(
     if search:
         like = f"%{search}%"
         query = query.where(
-            User.email.ilike(like) | User.full_name.ilike(like) | User.phone.ilike(like)
+            User.email.ilike(like) | User.full_name.ilike(like)
         )
 
     total   = db.scalar(select(func.count()).select_from(query.subquery()))
@@ -289,7 +274,7 @@ def delete_user(db: Session, user_id: int, requester: User) -> None:
     """
     user = get_user_by_id(db, user_id, requester)
     # Placeholder: in production check for orders/positions before deleting
-    user.status = UserStatus.SUSPENDED
+    db.delete(user)
     db.commit()
 
 

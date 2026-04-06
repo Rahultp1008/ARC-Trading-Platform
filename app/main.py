@@ -4,15 +4,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.auth    import router as auth_router
 from app.api.v1.admin   import router as admin_router
-from app.api.v1.user  import router as users_router
+from app.api.v1.user   import router as users_router
 from app.api.v1.kyc     import router as kyc_router
 from app.api.v1.funding import router as funding_router
-
-from app.core.database import Base, engine
-from app.models import *
-
-
-
 
 app = FastAPI(
     title      = "ARC Trading Platform — Backend API",
@@ -40,10 +34,3 @@ def health():
 @app.get("/", tags=["Root"])
 def root():
     return {"project": "ARC Trading Platform", "docs": "/docs"}
-
-
-
-@app.on_event("startup")
-def create_tables():
-    print("🔥 Creating tables...")
-    Base.metadata.create_all(bind=engine)

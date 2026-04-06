@@ -140,7 +140,6 @@ def activate_broker(db: Session, broker_id: int) -> Broker:
             detail="Broker is already active.",
         )
     broker.is_active = True
-    broker.admin_notes = "Reactivated by admin"
     db.commit()
     db.refresh(broker)
     return broker

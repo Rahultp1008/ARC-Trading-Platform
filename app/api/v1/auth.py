@@ -1,11 +1,18 @@
 # app/api/v1/auth.py
+# ---------------------------------------------------------------------------
+# All authentication endpoints live here under the /api/v1/auth prefix.
+# Each function is one HTTP route.  FastAPI calls our Depends() functions
+# automatically before the route body runs.
+# ---------------------------------------------------------------------------
+
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, require_role
+from app.core.dependencies import get_current_user
+from app.core.permission  import require_super_admin, require_broker_or_admin
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -13,10 +20,9 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
-from app.models.broker import Broker
 from app.models.login_audit import LoginAudit
 from app.models.refresh_token import RefreshToken
-from app.models.user import User, UserStatus
+from app.models.user import User
 from app.schemas.auth import (
     ChangePasswordRequest,
     LoginRequest,
@@ -35,6 +41,7 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 # Helper — persist a refresh token record in the DB
 # ---------------------------------------------------------------------------
 def _store_refresh_token(db: Session, user_id: int, token: str) -> None:
+    """Save a newly issued refresh token so we can revoke it later."""
     record = RefreshToken(
         user_id   = user_id,
         token     = token,
@@ -50,74 +57,55 @@ def _store_refresh_token(db: Session, user_id: int, token: str) -> None:
 # ---------------------------------------------------------------------------
 @router.post("/login", response_model=TokenResponse, status_code=status.HTTP_200_OK)
 def login(
-    payload: LoginRequest,
-    request: Request,
-    db     : Session = Depends(get_db),
+    payload : LoginRequest,
+    request : Request,          # gives us IP + User-Agent for audit logging
+    db      : Session = Depends(get_db),
 ):
-    # ── 1. CHECK USERS TABLE ──
-    user = db.query(User).filter(User.email == payload.email).first()
+    """
+    Authenticate a user and issue a short-lived access token + long-lived
+    refresh token.
 
-    if user:
-        if not verify_password(payload.password, user.hashed_password):
-            # Log failed attempt
-            db.add(LoginAudit(
+    Steps:
+      1. Look up the user by email.
+      2. Verify the password against the stored bcrypt hash.
+      3. Record the attempt in login_audit (success or failure).
+      4. Issue tokens and save the refresh token in the DB.
+    """
+    user: User | None = db.query(User).filter(User.email == payload.email).first()
+
+    # Helper to log the attempt regardless of outcome
+    def audit(success: bool):
+        if user:
+            log = LoginAudit(
                 user_id   = user.id,
                 ip_address= request.client.host if request.client else None,
                 user_agent= request.headers.get("user-agent"),
-                success   = False,
-            ))
+                success   = success,
+            )
+            db.add(log)
             db.commit()
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                                detail="Invalid credentials.")
 
-        if user.status == UserStatus.SUSPENDED:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
-                                detail="Account is suspended.")
+    # Wrong email
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials.")
 
-        # Log success
-        db.add(LoginAudit(
-            user_id   = user.id,
-            ip_address= request.client.host if request.client else None,
-            user_agent= request.headers.get("user-agent"),
-            success   = True,
-        ))
-        user.last_login_at = datetime.now(timezone.utc)
+    # Wrong password
+    if not verify_password(payload.password, user.hashed_password):
+        audit(success=False)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials.")
 
-        access_token  = create_access_token(user.id, user.role)
-        refresh_token = create_refresh_token(user.id)   # FIX: int, not dict
-        _store_refresh_token(db, user.id, refresh_token)
+    # Inactive account
+    if not user.is_active:
+        audit(success=False)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled.")
 
-        return TokenResponse(
-            access_token =access_token,
-            refresh_token=refresh_token,
-            token_type   ="bearer",
-        )
+    # Everything is good — issue tokens
+    audit(success=True)
+    access_token  = create_access_token(user.id, user.role)
+    refresh_token = create_refresh_token(user.id)
+    _store_refresh_token(db, user.id, refresh_token)
 
-    # ── 2. CHECK BROKERS TABLE ──
-    broker = db.query(Broker).filter(Broker.email == payload.email).first()
-
-    if broker:
-        if not verify_password(payload.password, broker.hashed_password):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                                detail="Invalid credentials.")
-
-        if not broker.is_active:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
-                                detail="Broker account is suspended.")
-
-        access_token  = create_access_token(broker.id, "broker")
-        refresh_token = create_refresh_token(broker.id)   # FIX: int, not dict
-        _store_refresh_token(db, broker.id, refresh_token)
-
-        return TokenResponse(
-            access_token =access_token,
-            refresh_token=refresh_token,
-            token_type   ="bearer",
-        )
-
-    # ── 3. NOT FOUND ──
-    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Invalid credentials.")
+    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +113,18 @@ def login(
 # ---------------------------------------------------------------------------
 @router.post("/refresh", response_model=TokenResponse, status_code=status.HTTP_200_OK)
 def refresh_tokens(payload: RefreshRequest, db: Session = Depends(get_db)):
+    """
+    Issue a new access + refresh token pair.
+
+    Refresh Token Rotation explained:
+      - Client sends its current refresh token.
+      - We verify it is valid AND not already revoked.
+      - We immediately mark it as revoked (so it can never be used again).
+      - We issue a brand-new refresh token and save it.
+      - If we ever see a *revoked* token being presented, it means someone
+        still has the old token — possible token theft — so we revoke ALL
+        tokens for that user and force re-login.
+    """
     bad_request = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid or expired refresh token.",
@@ -141,35 +141,34 @@ def refresh_tokens(payload: RefreshRequest, db: Session = Depends(get_db)):
     stored: RefreshToken | None = (
         db.query(RefreshToken)
         .filter(
-            RefreshToken.token   == payload.refresh_token,
-            RefreshToken.user_id == user_id,
+            RefreshToken.token    == payload.refresh_token,
+            RefreshToken.user_id  == user_id,
         )
         .first()
     )
+
     if not stored:
         raise bad_request
 
-    # 3. Token reuse detected — revoke ALL tokens for this user
+    # 3. Token reuse detected — revoke everything for this user
     if stored.is_revoked:
-        db.query(RefreshToken).filter(
-            RefreshToken.user_id == user_id
-        ).update({"is_revoked": True})
+        db.query(RefreshToken).filter(RefreshToken.user_id == user_id).update({"is_revoked": True})
         db.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token reuse detected. All sessions revoked. Please log in again.",
+            detail="Token reuse detected. All sessions have been revoked. Please log in again.",
         )
 
-    # 4. Token expired in DB
+    # 4. Token has expired in the DB
     if stored.expires_at < datetime.now(timezone.utc):
         raise bad_request
 
-    # 5. Rotate — revoke old, issue new
+    # 5. All good — rotate: revoke old, issue new
     stored.is_revoked = True
     db.commit()
 
     user: User | None = db.get(User, user_id)
-    if not user or user.status == UserStatus.SUSPENDED:
+    if not user or not user.is_active:
         raise bad_request
 
     new_access  = create_access_token(user.id, user.role)
@@ -188,6 +187,12 @@ def logout(
     current_user: User    = Depends(get_current_user),
     db          : Session = Depends(get_db),
 ):
+    """
+    Revoke the provided refresh token.
+    The client should also discard its access token locally (we cannot
+    invalidate short-lived JWTs server-side without a blocklist, but they
+    will expire in 15 minutes on their own).
+    """
     stored: RefreshToken | None = (
         db.query(RefreshToken)
         .filter(
@@ -196,6 +201,7 @@ def logout(
         )
         .first()
     )
+
     if stored and not stored.is_revoked:
         stored.is_revoked = True
         db.commit()
@@ -206,15 +212,13 @@ def logout(
 # ---------------------------------------------------------------------------
 # GET /me
 # ---------------------------------------------------------------------------
-@router.get("/me")
-def get_me(current_user=Depends(get_current_user)):
-    return {
-        "id"       : current_user.id,
-        "email"    : current_user.email,
-        "full_name": getattr(current_user, "full_name", None),
-        "role"     : str(current_user.role.value if hasattr(current_user.role, "value") else current_user.role),
-        "status"   : str(getattr(current_user, "status", "active")),
-    }
+@router.get("/me", response_model=UserResponse, status_code=status.HTTP_200_OK)
+def get_me(current_user: User = Depends(get_current_user)):
+    """
+    Return the profile of the currently authenticated user.
+    Protected by get_current_user dependency — 401 if no valid token.
+    """
+    return current_user
 
 
 # ---------------------------------------------------------------------------
@@ -226,41 +230,56 @@ def change_password(
     current_user: User    = Depends(get_current_user),
     db          : Session = Depends(get_db),
 ):
+    """
+    Securely update the user's password.
+
+    Steps:
+      1. Verify the *current* password so an attacker who hijacks a session
+         cannot silently change the password without knowing the old one.
+      2. Hash the new password with bcrypt.
+      3. Revoke all existing refresh tokens to force re-login on all devices.
+    """
     if not verify_password(payload.current_password, current_user.hashed_password):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="Current password is incorrect.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect.")
 
     if payload.current_password == payload.new_password:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="New password must differ from the current password.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="New password must differ from the current password.")
 
+    # Update the password
     current_user.hashed_password = hash_password(payload.new_password)
 
-    # Revoke all refresh tokens — forces re-login on all devices
-    db.query(RefreshToken).filter(
-        RefreshToken.user_id == current_user.id
-    ).update({"is_revoked": True})
+    # Revoke all refresh tokens — forces re-login everywhere
+    db.query(RefreshToken).filter(RefreshToken.user_id == current_user.id).update({"is_revoked": True})
 
     db.commit()
+
     return MessageResponse(message="Password updated successfully. Please log in again.")
 
 
 # ---------------------------------------------------------------------------
-# Demo RBAC routes
+# Example: a route only super_admin can access
 # ---------------------------------------------------------------------------
 @router.get(
     "/admin-dashboard",
     response_model=MessageResponse,
-    dependencies=[Depends(require_role("super_admin"))],
+    dependencies=[Depends(require_super_admin)],
 )
 def admin_only_route():
+    """
+    Demonstrates RBAC. Only users with role `super_admin` can reach this.
+    Brokers and regular users will receive a 403 Forbidden.
+    """
     return MessageResponse(message="Welcome, Super Admin!")
 
 
+# ---------------------------------------------------------------------------
+# Example: a route for both super_admin and broker
+# ---------------------------------------------------------------------------
 @router.get(
     "/broker-area",
     response_model=MessageResponse,
-    dependencies=[Depends(require_role("super_admin", "broker"))],
+    dependencies=[Depends(require_broker_or_admin)],
 )
 def broker_route():
+    """Both super_admin and broker may access this endpoint."""
     return MessageResponse(message="Welcome to the broker area!")

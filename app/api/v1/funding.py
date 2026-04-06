@@ -232,4 +232,3 @@ def create_snapshot(
     """
     snap = funding_service.create_balance_snapshot(db, user_id, reason)
     return BalanceSnapshotResponse.model_validate(snap)
-

@@ -1,4 +1,4 @@
-#app/models/user.py
+# app/models/user.py
 # ---------------------------------------------------------------------------
 # User model for the ARC Trading platform.
 # Per spec section 5.2: Users are always scoped to a Broker via broker_id.
@@ -9,7 +9,6 @@ from __future__ import annotations
 import enum
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
-from sqlalchemy.orm import relationship
 
 from sqlalchemy import (
     Boolean, DateTime, Enum, ForeignKey, Integer,
@@ -88,11 +87,3 @@ class User(Base):
 
     def __repr__(self) -> str:
         return f"<User id={self.id} email={self.email} role={self.role} status={self.status}>"
-    
-
-    
-
-
-    login_audits = relationship("LoginAudit", back_populates="user")
-    login_audits = relationship("LoginAudit", back_populates="user")
-    refresh_tokens = relationship("RefreshToken", back_populates="user")

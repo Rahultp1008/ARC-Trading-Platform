@@ -17,9 +17,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
-
-
-
 # Guard: import User only when a type-checker runs, never at runtime.
 # Prevents the circular import chain: login_audit → user → login_audit.
 if TYPE_CHECKING:
@@ -45,6 +42,3 @@ class LoginAudit(Base):
 
     def __repr__(self) -> str:
         return f"<LoginAudit id={self.id} user_id={self.user_id} success={self.success}>"
-    
-
-    user: Mapped[User] = relationship("User", back_populates="login_audits")
