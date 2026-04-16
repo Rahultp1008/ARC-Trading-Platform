@@ -1,17 +1,8 @@
 # app/core/security.py
-# ---------------------------------------------------------------------------
-# Password hashing and JWT token utilities.
-#
-# TWO SEPARATE TOKEN TYPES:
-#   Access token  — short-lived (15 min), signed with SECRET_KEY
-#                   sent in every API request Authorization header
-#   Refresh token — long-lived (7 days), signed with REFRESH_SECRET_KEY
-#                   stored in the DB, used only to get new access tokens
-#
-# Using a SEPARATE secret key for refresh tokens means a leaked access
-# token cannot be used to forge a refresh token, and vice versa.
-# ---------------------------------------------------------------------------
-
+# FIXED: create_access_token now safely extracts .value from enum roles
+# so the JWT payload always contains a plain string like "user" / "super_admin"
+# instead of enum repr. This ensures decode_access_token can do simple
+# string comparison in dependencies.py.
 from datetime import datetime, timedelta, timezone
 
 from jose import JWTError, jwt
@@ -19,34 +10,30 @@ from passlib.context import CryptContext
 
 from app.core.config import settings
 
-# bcrypt is the industry standard for password hashing.
-# deprecated="auto" means passlib will automatically re-hash old bcrypt
-# variants to the current recommended settings on next login.
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-# ── Password helpers ──────────────────────────────────────────────────────
+# ── Password helpers ─────────────────────────────────────────────────────
 
 def hash_password(plain: str) -> str:
-    """Return a bcrypt hash of the plaintext password."""
     return pwd_context.hash(plain)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    """Return True if the plaintext matches the stored bcrypt hash."""
     return pwd_context.verify(plain, hashed)
 
 
-# ── Access token ──────────────────────────────────────────────────────────
+# ── Access token ─────────────────────────────────────────────────────────
 
-def create_access_token(user_id: int, role: str) -> str:
+def create_access_token(user_id: int, role) -> str:
     """
-    Create a short-lived JWT access token (default: 15 minutes).
-    Signed with SECRET_KEY. Carries user_id (sub), role, and type="access".
+    Create a short-lived JWT access token.
+    'role' can be a UserRole enum or plain string — always stored as .value string.
     """
+    role_value = role.value if hasattr(role, "value") else str(role).lower()
     payload = {
         "sub" : str(user_id),
-        "role": role,
+        "role": role_value,
         "type": "access",
         "exp" : datetime.now(timezone.utc) + timedelta(
             minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
@@ -56,10 +43,6 @@ def create_access_token(user_id: int, role: str) -> str:
 
 
 def decode_access_token(token: str) -> dict | None:
-    """
-    Decode and validate an access token.
-    Returns the payload dict, or None if invalid/expired/wrong type.
-    """
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         return payload if payload.get("type") == "access" else None
@@ -67,13 +50,12 @@ def decode_access_token(token: str) -> dict | None:
         return None
 
 
-# ── Refresh token ─────────────────────────────────────────────────────────
+# ── Refresh token ────────────────────────────────────────────────────────
 
 def create_refresh_token(user_id: int) -> str:
     """
-    Create a long-lived JWT refresh token (default: 7 days).
-    Signed with REFRESH_SECRET_KEY (different from access token secret).
-    Carries only user_id and type="refresh" — no role, to limit exposure.
+    Create a long-lived JWT refresh token.
+    Only stores user_id — no role to limit exposure.
     """
     payload = {
         "sub" : str(user_id),
@@ -86,11 +68,6 @@ def create_refresh_token(user_id: int) -> str:
 
 
 def decode_refresh_token(token: str) -> dict | None:
-    """
-    Decode and validate a refresh token.
-    Uses REFRESH_SECRET_KEY — will reject any access token presented here.
-    Returns the payload dict, or None if invalid/expired/wrong type.
-    """
     try:
         payload = jwt.decode(
             token, settings.REFRESH_SECRET_KEY, algorithms=[settings.ALGORITHM]

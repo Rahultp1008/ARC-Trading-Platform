@@ -36,9 +36,8 @@ class LoginAudit(Base):
         default=lambda: datetime.now(timezone.utc),
     )
 
-    # Relationship back to the User.
-    # "User" (string) is resolved by SQLAlchemy's mapper registry at startup.
-    user: Mapped[User] = relationship("User", back_populates="login_audits")
+    # No back_populates — User model has no login_audits collection.
+    user: Mapped[User] = relationship("User", foreign_keys=[user_id], lazy="raise")
 
     def __repr__(self) -> str:
         return f"<LoginAudit id={self.id} user_id={self.user_id} success={self.success}>"

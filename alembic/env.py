@@ -7,7 +7,9 @@
 #   2. Pass `target_metadata` so `alembic revision --autogenerate` can diff
 #      your models against the current DB schema.
 # ---------------------------------------------------------------------------
-
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
@@ -19,6 +21,10 @@ from app.core.config import settings
 # Import Base AND all models so Alembic's autogenerate can see every table.
 from app.core.database import Base
 import app.models  # noqa: F401 — side-effect import registers all models on Base
+import app.models.user
+import app.models.refresh_token
+import app.models.login_audit
+import app.models.instruments  #  ADDED
 
 # Alembic config object (wraps alembic.ini)
 config = context.config
@@ -68,3 +74,5 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
+    
+ 
