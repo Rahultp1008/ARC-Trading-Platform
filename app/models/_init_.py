@@ -6,4 +6,7 @@ from app.models.funding       import FundingLog, WalletLedger, BalanceSnapshot #
 from app.models.login_audit   import LoginAudit                                # noqa: F401
 from app.models.refresh_token import RefreshToken                              # noqa: F401
 from app.models.instruments   import Instrument, InstrumentSyncLog             # noqa: F401
-from app.models.order         import Order, OrderEvent, OrderTrigger  # noqa: F401
+from app.models.order         import Order, OrderEvent, OrderTrigger           # noqa: F401
+from app.models.fill          import OrderFill, TradeLog, ExecutionEvent
+from app.models.position      import Position
+from app.models.portfolio     import HoldingsSnapshot, PortfolioSnapshot

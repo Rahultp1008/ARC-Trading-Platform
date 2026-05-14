@@ -1,6 +1,7 @@
 # =============================================================================
 # app/models/order.py
 # Module 6 — Order Management | ARC Trading Platform
+# MODIFIED for Module 7 — Added version column for optimistic locking
 # =============================================================================
 #
 # DATABASE TABLES CREATED BY THIS FILE:
@@ -18,6 +19,40 @@
 #   4c. Order type = SL/TP   → sits waiting for trigger price    → PENDING_TRIGGER
 #
 # Each transition writes a row to order_events for full traceability.
+#
+# ── MODULE 7 CHANGE — OPTIMISTIC LOCKING ─────────────────────────────────────
+# Added: version column on the Order model.
+#
+# WHAT IS OPTIMISTIC LOCKING?
+#   When the Limit Order Watcher runs in the background, it processes
+#   QUEUED orders every second. If two workers run at the same time,
+#   both might try to fill the same order simultaneously.
+#
+#   Without locking → DUPLICATE FILL → user gets charged twice → data corruption.
+#   With version   → only ONE worker wins → other sees version changed → skips.
+#
+# HOW VERSION WORKS (step by step):
+#
+#   Order #5 created → version = 0
+#
+#   Worker A reads order #5 → sees version = 0
+#   Worker B reads order #5 → sees version = 0
+#
+#   Worker A executes:
+#     UPDATE orders
+#     SET status = 'filled', version = 1      ← bumps version to 1
+#     WHERE id = 5 AND version = 0            ← checks version is still 0
+#     → 1 row updated ✓  (version was 0, now set to 1)
+#
+#   Worker B executes (too late):
+#     UPDATE orders
+#     SET status = 'filled', version = 1
+#     WHERE id = 5 AND version = 0            ← version is now 1, not 0
+#     → 0 rows updated ✗  (version mismatch — another worker already filled it)
+#     → Worker B detects 0 rows → SKIPS → no duplicate fill
+#
+# This is called "optimistic" because we assume conflicts are rare,
+# so we do NOT lock the row upfront. We only detect conflicts at write time.
 # =============================================================================
 
 from __future__ import annotations
@@ -145,6 +180,11 @@ class Order(Base):
         When order moves ACCEPTED → margin_blocked is set.
         When order moves FILLED  → margin_blocked is released by Execution Engine.
         When order CANCELLED     → Cancellation Engine releases margin_blocked.
+
+    VERSION (Module 7):
+        Starts at 0 when order is created.
+        Incremented by 1 on every fill by the Execution Engine.
+        Used for optimistic locking to prevent duplicate fills.
     """
     __tablename__ = "orders"
 
@@ -243,6 +283,49 @@ class Order(Base):
         comment="Client-provided unique key — prevents duplicate orders on retry"
     )
 
+    # =========================================================================
+    # ── MODULE 7 ADDITION — OPTIMISTIC LOCKING VERSION ───────────────────────
+    # =========================================================================
+    # This is the ONLY new field added to this file for Module 7.
+    #
+    # LIFECYCLE:
+    #   Order created           → version = 0   (default)
+    #   First fill by engine    → version = 1   (engine sets version += 1)
+    #   Partial fill #2         → version = 2
+    #   Final fill              → version = 3
+    #
+    # HOW THE ENGINE USES IT:
+    #   # Read the current version
+    #   current_version = order.version   # e.g. 0
+    #
+    #   # Try to update — only succeeds if version has NOT changed
+    #   rows_updated = db.execute(
+    #       update(Order)
+    #       .where(Order.id == order_id)
+    #       .where(Order.version == current_version)   # ← the lock check
+    #       .values(status="filled", version=current_version + 1)
+    #   ).rowcount
+    #
+    #   if rows_updated == 0:
+    #       # Another worker already filled it — skip to avoid duplicate
+    #       return
+    #
+    # ALSO REQUIRED: Run this SQL once in psql or pgAdmin:
+    #   ALTER TABLE orders
+    #   ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0;
+    # =========================================================================
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment=(
+            "Optimistic lock version — starts at 0 when order is created. "
+            "Incremented by 1 on every fill by the Execution Engine. "
+            "Used to prevent duplicate fills when multiple workers run simultaneously."
+        )
+    )
+    # =========================================================================
+
     # ── Timestamps ───────────────────────────────────────────────────────────
     placed_at   : Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -276,7 +359,8 @@ class Order(Base):
     def __repr__(self) -> str:
         return (
             f"<Order id={self.id} symbol={self.symbol} "
-            f"type={self.order_type.value} status={self.status.value}>"
+            f"type={self.order_type.value} status={self.status.value} "
+            f"version={self.version}>"
         )
 
 

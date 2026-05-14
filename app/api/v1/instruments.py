@@ -83,7 +83,7 @@ def search_instruments(
         is_active=is_active,
         trading_allowed=trading_allowed,
         page=page,
-        size=size,
+        page_size=size,   # FIX: was size=size — InstrumentSearch field is page_size
     )
     svc = InstrumentService(db)
     return svc.search(params)

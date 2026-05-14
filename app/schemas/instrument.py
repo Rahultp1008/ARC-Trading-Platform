@@ -1,6 +1,10 @@
 """
 app/schemas/instrument.py
 Module 4 — Instrument Master | ARC Trading Platform
+
+FIXES APPLIED:
+  FIX 2: InstrumentSummary now includes ltp, change, change_pct, volume
+          so search results show live prices alongside instrument metadata.
 """
 from __future__ import annotations
 
@@ -14,7 +18,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.models.instruments import InstrumentType, OptionType, PriceSource, Segment
 
 
-# ── Shared base ───────────────────────────────────────────────────────────────
+# ── Shared base ────────────────────────────────────────────────────────────────
 
 class _Base(BaseModel):
     symbol:            str            = Field(..., max_length=64)
@@ -61,8 +65,11 @@ class InstrumentRead(_Base):
 class InstrumentSummary(BaseModel):
     """
     Condensed view for market lists, watchlists, and order-ticket search.
+    FIX 2: Added ltp, change, change_pct, volume fields so the frontend
+            can display live prices directly in search results without
+            needing a separate /quotes/{symbol} call per instrument.
 
-    UI tab routing — frontend reads `segment`:
+    UI tab routing — frontend reads segment:
       CASH   →  Equities / ETFs / Indices tab
       FNO    →  Futures & Options tab
       CRYPTO →  Crypto Paper Trading tab
@@ -72,7 +79,7 @@ class InstrumentSummary(BaseModel):
     display_name:    str
     exchange:        str
     instrument_type: InstrumentType
-    segment:         Segment           # ← UI tab key
+    segment:         Segment           # UI tab key
     tick_size:       Decimal
     lot_size:        Decimal
     expiry:          Optional[date]        = None
@@ -82,6 +89,13 @@ class InstrumentSummary(BaseModel):
     trading_allowed: bool
     is_index:        bool
     price_source:    PriceSource
+
+    # FIX 2: Live price fields — populated by InstrumentService.search()
+    # from Redis price cache. None if simulator is not running.
+    ltp:             Optional[float]       = None   # last traded price
+    change:          Optional[float]       = None   # absolute price change
+    change_pct:      Optional[float]       = None   # % change (e.g. +1.24)
+    volume:          Optional[float]       = None   # traded volume
 
     model_config = {"from_attributes": True}
 
@@ -93,16 +107,12 @@ class InstrumentSearch(BaseModel):
     All filters for GET /api/v1/instruments.
 
     Text search (q):
-      Prefix match:  symbol ILIKE 'RELI%'   always applied
-      Fuzzy match:   pg_trgm similarity > 0.3  (requires CREATE EXTENSION pg_trgm)
-      Falls back to prefix-only when extension is absent.
+      Searches across: symbol, display_name, external_symbol (ILIKE %q%)
+      Falls back to prefix-only when pg_trgm extension is absent.
 
     UI tab filter (segment):
       CASH / FNO / CRYPTO  →  powers the three market list tabs.
       Omit to search across all segments.
-
-    F&O option-chain drill-down:
-      underlying_symbol + option_type + expiry_from/to + min/max_strike.
     """
 
     q:                 Optional[str]          = Field(None, max_length=100,
@@ -119,7 +129,7 @@ class InstrumentSearch(BaseModel):
     is_active:         Optional[bool]           = Field(True, description="Default: active only")
     trading_allowed:   Optional[bool]           = None
     page:              int                      = Field(1,  ge=1)
-    page_size:         int                      = Field(20, ge=1, le=100)
+    page_size:         int                      = Field(20, ge=1, le=100)   # FIX 1 relies on this field name
 
     @model_validator(mode="after")
     def _check_ranges(self) -> "InstrumentSearch":
@@ -148,13 +158,7 @@ class InstrumentSearchResponse(BaseModel):
 # ── Admin toggle ──────────────────────────────────────────────────────────────
 
 class InstrumentToggleRequest(BaseModel):
-    """
-    Body for PATCH /api/v1/instruments/{id}/toggle — Super Admin only.
-
-    trading_allowed = False  →  soft block: orders rejected, instrument still visible
-    is_active       = False  →  hard block: hidden from all searches (delisted)
-    """
-    trading_allowed: bool          = Field(...,
+    trading_allowed: bool           = Field(...,
         description="False = suspend order placement; instrument stays visible")
     is_active:       Optional[bool] = Field(None,
         description="False = hide from all searches")
