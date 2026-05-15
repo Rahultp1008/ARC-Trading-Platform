@@ -150,6 +150,9 @@ from app.api.v1.order       import router as order_router
 # Module 8 — Portfolio & PnL
 from app.api.v1.portfolio   import router as portfolio_router
 
+# Module 9 — Risk & Margin Module
+from app.api.v1.risk        import router as risk_router
+
 # Module 10 — Funding
 from app.api.v1.funding     import router as funding_router
 
@@ -169,6 +172,7 @@ app.include_router(market_router,      prefix=PREFIX)   # Module 5
 app.include_router(ws_router,          prefix=PREFIX)   # Module 5
 app.include_router(order_router,       prefix=PREFIX)   # Module 6
 app.include_router(portfolio_router,   prefix=PREFIX)   # Module 8
+app.include_router(risk_router,        prefix=PREFIX)   # Module 9
 app.include_router(funding_router,     prefix=PREFIX)   # Module 10
 
 
